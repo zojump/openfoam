@@ -1,0 +1,280 @@
+#!/bin/bash
+# Enhanced OpenFOAM Docker script for MacBook Pro
+# Optimized for maximum performance and resource utilization
+
+set -e
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Script configuration
+SCRIPT_VERSION="1.0.0"
+OPENFOAM_VERSION="2412"
+IMAGE_VARIANT="default"  # default, dev, run
+CACHE_DIR="$HOME/.docker/openfoam-cache"
+
+# Performance settings
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
+print_header() {
+    echo -e "${BLUE}🚀 OpenFOAM Docker Launcher for MacBook Pro${NC}"
+    echo -e "${BLUE}Version: ${SCRIPT_VERSION}${NC}"
+    echo "================================================"
+}
+
+detect_system() {
+    # Detect system specifications
+    TOTAL_CORES=$(sysctl -n hw.ncpu)
+    TOTAL_RAM_GB=$(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 ))
+    
+    # Detect chip type
+    if [[ $(uname -m) == "arm64" ]]; then
+        CHIP_TYPE="Apple Silicon"
+        CPU_BRAND=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
+    else
+        CHIP_TYPE="Intel"
+        CPU_BRAND=$(sysctl -n machdep.cpu.brand_string)
+    fi
+    
+    # Calculate optimal resources (75% CPU, 50-75% RAM based on total)
+    OPTIMAL_CORES=$(( TOTAL_CORES * 3 / 4 ))
+    if [ $TOTAL_RAM_GB -ge 32 ]; then
+        OPTIMAL_RAM=$(( TOTAL_RAM_GB * 3 / 4 ))
+    elif [ $TOTAL_RAM_GB -ge 16 ]; then
+        OPTIMAL_RAM=$(( TOTAL_RAM_GB * 2 / 3 ))
+    else
+        OPTIMAL_RAM=$(( TOTAL_RAM_GB / 2 ))
+    fi
+    
+    # Ensure minimums
+    [ $OPTIMAL_CORES -lt 2 ] && OPTIMAL_CORES=2
+    [ $OPTIMAL_RAM -lt 4 ] && OPTIMAL_RAM=4
+    
+    echo -e "${GREEN}System Detection:${NC}"
+    echo "  Chip: $CHIP_TYPE ($CPU_BRAND)"
+    echo "  Total Cores: $TOTAL_CORES"
+    echo "  Total RAM: ${TOTAL_RAM_GB}GB"
+    echo "  Allocated Cores: $OPTIMAL_CORES"
+    echo "  Allocated RAM: ${OPTIMAL_RAM}GB"
+    echo ""
+}
+
+check_docker() {
+    if ! command -v docker &> /dev/null; then
+        echo -e "${RED}❌ Docker not found. Please install Docker Desktop for Mac.${NC}"
+        exit 1
+    fi
+    
+    if ! docker info &> /dev/null; then
+        echo -e "${RED}❌ Docker daemon not running. Please start Docker Desktop.${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}✅ Docker is running${NC}"
+}
+
+setup_cache_dirs() {
+    echo -e "${YELLOW}Setting up cache directories...${NC}"
+    mkdir -p "$CACHE_DIR"/{ccache,npm,pip,apt,conda}
+    echo -e "${GREEN}✅ Cache directories created${NC}"
+}
+
+pull_image() {
+    local image="opencfd/openfoam-${IMAGE_VARIANT}:${OPENFOAM_VERSION}"
+    echo -e "${YELLOW}Checking for OpenFOAM image: $image${NC}"
+    
+    if ! docker image inspect "$image" &> /dev/null; then
+        echo -e "${YELLOW}Pulling OpenFOAM image...${NC}"
+        docker pull "$image"
+    else
+        echo -e "${GREEN}✅ Image already available${NC}"
+    fi
+}
+
+print_usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS] [COMMAND]
+
+Options:
+  -v, --version VERSION    OpenFOAM version (default: $OPENFOAM_VERSION)
+  -i, --image VARIANT      Image variant: default, dev, run (default: $IMAGE_VARIANT)
+  -c, --cores NUM         Override CPU cores (default: auto-detected)
+  -m, --memory NUM        Override memory in GB (default: auto-detected)
+  -w, --workdir PATH      Working directory (default: current directory)
+  --no-cache              Disable cache mounts
+  --gui                   Enable GUI support (X11 forwarding)
+  --profile               Enable performance profiling
+  -h, --help              Show this help
+
+Examples:
+  $(basename "$0")                    # Interactive shell
+  $(basename "$0") blockMesh          # Run blockMesh
+  $(basename "$0") --dev wmake        # Development environment
+  $(basename "$0") --profile simpleFoam  # Run with profiling
+
+Environment Variables:
+  OPENFOAM_CASE_DIR      Case directory (default: current dir)
+  OPENFOAM_CACHE_DIR     Cache directory (default: ~/.docker/openfoam-cache)
+EOF
+}
+
+parse_arguments() {
+    WORKDIR="$(pwd)"
+    USE_CACHE=true
+    ENABLE_GUI=false
+    ENABLE_PROFILE=false
+    COMMAND_ARGS=()
+    
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -v|--version)
+                OPENFOAM_VERSION="$2"
+                shift 2
+                ;;
+            -i|--image)
+                IMAGE_VARIANT="$2"
+                shift 2
+                ;;
+            -c|--cores)
+                OPTIMAL_CORES="$2"
+                shift 2
+                ;;
+            -m|--memory)
+                OPTIMAL_RAM="$2"
+                shift 2
+                ;;
+            -w|--workdir)
+                WORKDIR="$2"
+                shift 2
+                ;;
+            --no-cache)
+                USE_CACHE=false
+                shift
+                ;;
+            --gui)
+                ENABLE_GUI=true
+                shift
+                ;;
+            --profile)
+                ENABLE_PROFILE=true
+                shift
+                ;;
+            -h|--help)
+                print_usage
+                exit 0
+                ;;
+            --)
+                shift
+                COMMAND_ARGS+=("$@")
+                break
+                ;;
+            -*)
+                echo -e "${RED}Unknown option: $1${NC}"
+                print_usage
+                exit 1
+                ;;
+            *)
+                COMMAND_ARGS+=("$1")
+                shift
+                ;;
+        esac
+    done
+}
+
+build_docker_command() {
+    local image="opencfd/openfoam-${IMAGE_VARIANT}:${OPENFOAM_VERSION}"
+    
+    DOCKER_CMD=(
+        "docker" "run"
+        "--rm" "-it"
+        "--cpus=${OPTIMAL_CORES}"
+        "--memory=${OPTIMAL_RAM}g"
+        "--shm-size=2g"
+    )
+    
+    # Volume mounts
+    DOCKER_CMD+=("-v" "${WORKDIR}:/home/openfoam/workingDir:delegated")
+    
+    if [ "$USE_CACHE" = true ]; then
+        DOCKER_CMD+=("-v" "${CACHE_DIR}:/home/openfoam/.cache:cached")
+        DOCKER_CMD+=("-v" "${CACHE_DIR}/ccache:/home/openfoam/.ccache:cached")
+    fi
+    
+    # Environment variables
+    DOCKER_CMD+=(
+        "-e" "FOAM_VERBOSE=1"
+        "-e" "WM_NCOMPPROCS=${OPTIMAL_CORES}"
+        "-e" "OMP_NUM_THREADS=${OPTIMAL_CORES}"
+        "-e" "MALLOC_ARENA_MAX=4"
+    )
+    
+    if [ "$USE_CACHE" = true ]; then
+        DOCKER_CMD+=(
+            "-e" "CCACHE_DIR=/home/openfoam/.ccache"
+            "-e" "CCACHE_MAXSIZE=5G"
+        )
+    fi
+    
+    # GUI support (experimental)
+    if [ "$ENABLE_GUI" = true ]; then
+        DOCKER_CMD+=(
+            "-e" "DISPLAY=host.docker.internal:0"
+            "-v" "/tmp/.X11-unix:/tmp/.X11-unix:rw"
+        )
+    fi
+    
+    # Profiling support
+    if [ "$ENABLE_PROFILE" = true ]; then
+        DOCKER_CMD+=(
+            "--cap-add=SYS_PTRACE"
+            "--security-opt" "seccomp=unconfined"
+        )
+    fi
+    
+    # Working directory
+    DOCKER_CMD+=("-w" "/home/openfoam/workingDir")
+    
+    # Image
+    DOCKER_CMD+=("$image")
+    
+    # Command arguments
+    if [ ${#COMMAND_ARGS[@]} -gt 0 ]; then
+        DOCKER_CMD+=("${COMMAND_ARGS[@]}")
+    fi
+}
+
+run_performance_check() {
+    if [ "$ENABLE_PROFILE" = true ]; then
+        echo -e "${BLUE}🔍 Performance profiling enabled${NC}"
+        echo "Additional tools available: valgrind, gdb, perf (if available)"
+    fi
+}
+
+main() {
+    print_header
+    parse_arguments "$@"
+    detect_system
+    check_docker
+    setup_cache_dirs
+    pull_image
+    build_docker_command
+    run_performance_check
+    
+    echo -e "${GREEN}Starting OpenFOAM container...${NC}"
+    echo -e "${BLUE}Command: ${DOCKER_CMD[*]}${NC}"
+    echo ""
+    
+    # Execute the Docker command
+    exec "${DOCKER_CMD[@]}"
+}
+
+# Handle script interruption
+trap 'echo -e "\n${YELLOW}Interrupted by user${NC}"; exit 130' INT
+
+# Run main function with all arguments
+main "$@"
