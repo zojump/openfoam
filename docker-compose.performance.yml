@@ -1,0 +1,188 @@
+# High-Performance Docker Compose Configuration for OpenFOAM on macOS
+# Optimized for MacBook Pro development workflows
+
+version: '3.8'
+
+services:
+  # Main development environment
+  openfoam-dev:
+    image: opencfd/openfoam-dev:2412
+    container_name: openfoam-development
+    hostname: openfoam-dev
+    
+    # Performance-optimized resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '8'      # Adjust based on your MacBook Pro
+          memory: 16G    # Adjust based on available RAM
+        reservations:
+          cpus: '4'
+          memory: 8G
+    
+    # Optimized volume mounts for macOS
+    volumes:
+      # Source code and cases (delegated for best write performance)
+      - ../cases:/home/openfoam/cases:delegated
+      - ../solvers:/home/openfoam/solvers:delegated
+      - ../tutorials:/home/openfoam/tutorials:delegated
+      
+      # Cache directories (cached for persistent data)
+      - openfoam-cache:/home/openfoam/.cache:cached
+      - ccache-data:/home/openfoam/.ccache:cached
+      - pip-cache:/home/openfoam/.local:cached
+      
+      # Configuration files
+      - ./config/bashrc:/home/openfoam/.bashrc:cached
+      - ./config/vimrc:/home/openfoam/.vimrc:cached
+    
+    # Performance environment variables
+    environment:
+      # OpenFOAM optimization
+      - FOAM_VERBOSE=1
+      - WM_NCOMPPROCS=8              # Parallel compilation
+      - OMP_NUM_THREADS=8            # OpenMP threads
+      - MALLOC_ARENA_MAX=4           # Memory optimization
+      
+      # Compiler cache
+      - CCACHE_DIR=/home/openfoam/.ccache
+      - CCACHE_MAXSIZE=5G
+      - CCACHE_COMPRESS=1
+      - CCACHE_COMPRESSLEVEL=6
+      
+      # Build optimization
+      - MAKEFLAGS=-j8
+      - CMAKE_BUILD_PARALLEL_LEVEL=8
+      
+    # Network and security
+    network_mode: bridge
+    security_opt:
+      - seccomp:unconfined
+    
+    # Keep container running
+    tty: true
+    stdin_open: true
+    
+    working_dir: /home/openfoam/cases
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "which", "openfoam"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  
+  # Specialized solver compilation service
+  solver-builder:
+    image: opencfd/openfoam-dev:2412
+    container_name: openfoam-builder
+    
+    volumes:
+      - ../solvers:/home/openfoam/solvers:delegated
+      - ccache-data:/home/openfoam/.ccache:cached
+      - solver-builds:/home/openfoam/builds:cached
+    
+    environment:
+      - WM_NCOMPPROCS=8
+      - CCACHE_DIR=/home/openfoam/.ccache
+      - CCACHE_MAXSIZE=10G
+      - MAKEFLAGS=-j8
+    
+    working_dir: /home/openfoam/solvers
+    command: ["sleep", "infinity"]
+    profiles:
+      - build
+  
+  # High-performance simulation runner
+  simulation-runner:
+    image: opencfd/openfoam-default:2412
+    container_name: openfoam-runner
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 24G
+    
+    volumes:
+      - ../cases:/home/openfoam/cases:delegated
+      - simulation-results:/home/openfoam/results:cached
+    
+    environment:
+      - OMP_NUM_THREADS=8
+      - FOAM_VERBOSE=1
+      - WM_NCOMPPROCS=8
+    
+    working_dir: /home/openfoam/cases
+    command: ["sleep", "infinity"]
+    profiles:
+      - simulation
+  
+  # Monitoring and metrics service
+  monitor:
+    image: nicolaka/netshoot
+    container_name: openfoam-monitor
+    
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./monitoring:/scripts:cached
+    
+    command: ["sleep", "infinity"]
+    profiles:
+      - monitoring
+  
+  # GUI service for ParaView (experimental)
+  paraview:
+    image: opencfd/openfoam-default:2412
+    container_name: openfoam-paraview
+    
+    volumes:
+      - ../cases:/home/openfoam/cases:cached
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - paraview-settings:/home/openfoam/.config:cached
+    
+    environment:
+      - DISPLAY=host.docker.internal:0
+      - QT_X11_NO_MITSHM=1
+    
+    network_mode: host
+    profiles:
+      - gui
+    
+    command: ["sleep", "infinity"]
+
+# Named volumes for persistent data and caching
+volumes:
+  openfoam-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${HOME}/.docker/openfoam-cache
+  
+  ccache-data:
+    driver: local
+    driver_opts:
+      type: none  
+      o: bind
+      device: ${HOME}/.docker/ccache
+  
+  pip-cache:
+    driver: local
+  
+  solver-builds:
+    driver: local
+  
+  simulation-results:
+    driver: local
+  
+  paraview-settings:
+    driver: local
+
+# Custom network for inter-container communication
+networks:
+  openfoam-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
