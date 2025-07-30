@@ -1,12 +1,12 @@
 # OpenFOAM
-- We are running OpenFOAM in the containter
-- After the successfull foam generation proccess you have to create <FOAMNAME>.foam file to let us use ParaView
+- We are running OpenFOAM in the container
+- After the successful foam generation process you have to create <FOAMNAME>.foam file to let us use ParaView
 - Our tutorials are stored inside `storage/tutorials` folder in this repository 
-- After you run Allrun you have to check log files for errors. Because AllRun not show any of errors
+- After you run Allrun you have to check log files for errors. Because AllRun does not show any errors
 # How to run
 - `./build.sh` - build custom docker image for local use
-- `./openfoam-docker-agent.sh` - run customer docker image 
-- `./openfoam-docker.sh` - run default docker image
+- `./openfoam-docker-agent` - run custom docker image 
+- `./openfoam-docker` - run default docker image
 
 ## Now we are running OpenFOAM here
 `docker ps`
